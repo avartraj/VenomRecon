@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "venomrecon"
+version = "2.0.0"
+description = "Bug bounty reconnaissance automation framework"
+requires-python = ">=3.10"
+dependencies = [
+    "uro",
+    "arjun",
+    "requests",
+    "urllib3",
+    "colorama",
+    "rich-argparse",
+    "rich",
+]
+
+[project.scripts]
+venomrecon = "venomrecon.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "black>=24.0",
+    "responses>=0.25",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

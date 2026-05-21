@@ -1,0 +1,7 @@
+uro
+arjun
+requests
+urllib3
+colorama
+rich-argparse
+rich
