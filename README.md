@@ -30,7 +30,7 @@ VenomRecon relies heavily on external Golang tools, Python scripts, and SecLists
 
 ## 1. Clone the Repository
 ```bash
-git clone https://github.com/yourusername/venomrecon.git
+git clone https://github.com/avartraj/venomrecon.git
 cd venomrecon
 ```
 
