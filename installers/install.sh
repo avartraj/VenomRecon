@@ -2,10 +2,9 @@
 # =============================================================================
 #  VenomRecon v1.0 — One-Shot Dependency Installer
 #  Target: WSL Kali Linux (or any Debian/Ubuntu system with Go ≥ 1.21)
-#  Run via:  bash install.sh
+#  Run via:  bash installers/install.sh   (from repo root)
+#         OR cd installers && bash install.sh  (works from anywhere now)
 # =============================================================================
-
-set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -30,6 +29,7 @@ echo ""
 echo "============================================="
 echo "  VenomRecon v1.0 — One-Shot Installer"
 echo "  Target: WSL Kali Linux / Debian / Ubuntu"
+echo "  Project root: $PROJECT_ROOT"
 echo "============================================="
 echo ""
 
@@ -65,27 +65,66 @@ fi
 
 echo "[+] Python: $(python3 --version)"
 
+# Check npm for getJS
+if ! command -v npm &>/dev/null; then
+    echo "[*] npm not found — will install nodejs..."
+    sudo apt-get install -y -qq nodejs npm 2>/dev/null || true
+fi
+
 # ── System packages ────────────────────────────────────────────────────────
 
 echo ""
 echo "[+] Installing system packages (apt)..."
 sudo apt-get update -qq
-sudo apt-get install -y -qq \
-    git curl wget dnsutils whois nmap masscan wpscan whatweb cloud-enum \
-    ruby ruby-dev build-essential cargo \
-    libpcap-dev libssl-dev \
-    2>/dev/null || true
 
-# ── ProjectDiscovery toolkit ───────────────────────────────────────────────
+apt_install() {
+    echo "    -> apt: $1"
+    sudo apt-get install -y -qq "$1" 2>/dev/null || echo "    [!] Failed: apt $1 (non-fatal)"
+}
 
-echo ""
-echo "[+] Installing ProjectDiscovery tools..."
+apt_install git
+apt_install curl
+apt_install wget
+apt_install dnsutils
+apt_install whois
+apt_install nmap
+apt_install masscan
+apt_install whatweb
+apt_install ruby
+apt_install ruby-dev
+apt_install build-essential
+apt_install cargo
+apt_install libpcap-dev
+apt_install libssl-dev
+apt_install nodejs
+apt_install npm
+
+# wpscan via gem (apt version is often stale)
+if ! command -v wpscan &>/dev/null; then
+    echo "    -> gem: wpscan"
+    sudo gem install wpscan --quiet 2>/dev/null || echo "    [!] Failed: wpscan (non-fatal)"
+fi
+
+if ! command -v gh &>/dev/null; then
+    echo ""
+    echo "[+] Installing GitHub CLI (gh)..."
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+    sudo apt-get update -qq 2>/dev/null
+    apt_install gh
+fi
+
+# ── Go tools ───────────────────────────────────────────────────────────────
 
 go_install() {
     echo "    -> $1"
-    go install -v "$1" 2>/dev/null || echo "    [!] Failed: $1 (non-fatal)"
+    go install "$1" 2>/dev/null || echo "    [!] Failed: $1 (non-fatal)"
 }
 
+echo ""
+echo "[+] Installing ProjectDiscovery tools..."
 go_install "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
 go_install "github.com/projectdiscovery/httpx/cmd/httpx@latest"
 go_install "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"
@@ -96,11 +135,7 @@ go_install "github.com/projectdiscovery/alterx/cmd/alterx@latest"
 go_install "github.com/projectdiscovery/cdncheck/cmd/cdncheck@latest"
 go_install "github.com/projectdiscovery/asnmap/cmd/asnmap@latest"
 go_install "github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest"
-
-# chaos-client
 go_install "github.com/projectdiscovery/chaos-client/cmd/chaos@latest"
-
-# ── Tomnomnom tools ────────────────────────────────────────────────────────
 
 echo ""
 echo "[+] Installing Tomnomnom tools..."
@@ -109,8 +144,6 @@ go_install "github.com/tomnomnom/waybackurls@latest"
 go_install "github.com/tomnomnom/qsreplace@latest"
 go_install "github.com/tomnomnom/gf@latest"
 go_install "github.com/tomnomnom/hacks/kxss@latest"
-
-# ── Discovery & crawling ───────────────────────────────────────────────────
 
 echo ""
 echo "[+] Installing discovery tools..."
@@ -122,17 +155,13 @@ go_install "github.com/jaeles-project/gospider@latest"
 go_install "github.com/d3mondev/puredns/v2@latest"
 go_install "github.com/gwen001/github-subdomains@latest"
 
-# ── Takeover tools ─────────────────────────────────────────────────────────
-
 echo ""
 echo "[+] Installing subdomain takeover tools..."
-go_install "github.com/PentestPadawan/subzy@latest"
+go_install "github.com/LukaSikic/subzy@latest"
 go_install "github.com/haccer/subjack@latest"
 go_install "github.com/anshumanbh/tko-subs@latest"
 go_install "github.com/ffuf/ffuf/v2@latest"
 go_install "github.com/OJ/gobuster/v3@latest"
-
-# ── XSS & fuzzing ──────────────────────────────────────────────────────────
 
 echo ""
 echo "[+] Installing XSS & fuzzing tools..."
@@ -143,40 +172,110 @@ go_install "github.com/dwisiswant0/crlfuzz/cmd/crlfuzz@latest"
 go_install "github.com/lobuhi/byp4xx@latest"
 go_install "github.com/kleiton0x00/ppmap@latest"
 
-# ── JS recon ───────────────────────────────────────────────────────────────
-
 echo ""
 echo "[+] Installing JS recon tools..."
 go_install "github.com/BishopFox/jsluice/cmd/jsluice@latest"
 go_install "github.com/Josue87/gotator@latest"
 
-# ── GitHub tools ───────────────────────────────────────────────────────────
-
 echo ""
 echo "[+] Installing GitHub recon tools..."
 go_install "github.com/gitleaks/gitleaks/v8@latest"
+go_install "github.com/trufflesecurity/trufflehog/v3@latest"
 
-# ── massdns ────────────────────────────────────────────────────────────────
+# ── massdns (from source) ──────────────────────────────────────────────────
 
 echo ""
 echo "[+] Building massdns from source..."
 if ! command -v massdns &>/dev/null; then
+    # save and restore the working directory explicitly.
+    _SAVED_DIR="$(pwd)"
     cd /tmp
     git clone --depth 1 https://github.com/blechschmidt/massdns.git massdns_build 2>/dev/null || true
     if [ -d massdns_build ]; then
-        cd massdns_build && make -j$(nproc) && sudo cp bin/massdns /usr/local/bin/ && cd /tmp && rm -rf massdns_build
+        cd massdns_build
+        make -j"$(nproc)" 2>/dev/null
+        sudo cp bin/massdns /usr/local/bin/ 2>/dev/null || true
+        cd /tmp
+        rm -rf massdns_build
         echo "[+] massdns installed."
     fi
+    cd "$_SAVED_DIR"
 else
     echo "[+] massdns already installed."
 fi
 
+# ── findomain (binary release) ─────────────────────────────────────────────
+# BUG-FIX-NEW: findomain was completely absent from install.sh
+
+echo ""
+echo "[+] Installing findomain..."
+if ! command -v findomain &>/dev/null; then
+    _arch="$(uname -m)"
+    if [ "$_arch" = "x86_64" ]; then
+        curl -sL "https://github.com/findomain/findomain/releases/latest/download/findomain-linux.zip" \
+             -o /tmp/findomain.zip 2>/dev/null \
+        && sudo unzip -oq /tmp/findomain.zip -d /usr/local/bin/ \
+        && sudo chmod +x /usr/local/bin/findomain \
+        && rm -f /tmp/findomain.zip \
+        && echo "[+] findomain installed." \
+        || echo "[!] Failed: findomain (non-fatal)"
+    else
+        echo "[!] findomain: unsupported arch $arch — install manually"
+    fi
+else
+    echo "[+] findomain already installed."
+fi
+
+# ── feroxbuster (binary release — faster than cargo) ──────────────────────
+
+echo ""
+echo "[+] Installing feroxbuster..."
+if ! command -v feroxbuster &>/dev/null; then
+    curl -sL "https://github.com/epi052/feroxbuster/releases/latest/download/feroxbuster_linux-amd64.deb" \
+         -o /tmp/feroxbuster.deb 2>/dev/null \
+    && sudo dpkg -i /tmp/feroxbuster.deb 2>/dev/null \
+    && rm -f /tmp/feroxbuster.deb \
+    && echo "[+] feroxbuster installed." \
+    || echo "[!] Failed: feroxbuster deb — trying cargo..." \
+    && cargo install feroxbuster 2>/dev/null \
+    || echo "[!] Failed: feroxbuster (non-fatal)"
+else
+    echo "[+] feroxbuster already installed."
+fi
+
+# ── x8 (binary release) ───────────────────────────────────────────────────
+
+echo ""
+echo "[+] Installing x8..."
+if ! command -v x8 &>/dev/null; then
+    curl -sL "https://github.com/Sh1Yo/x8/releases/latest/download/x86_64-linux-x8" \
+         -o /tmp/x8 2>/dev/null \
+    && sudo mv /tmp/x8 /usr/local/bin/x8 \
+    && sudo chmod +x /usr/local/bin/x8 \
+    && echo "[+] x8 installed." \
+    || echo "[!] Failed: x8 binary — trying cargo..." \
+    && cargo install x8 2>/dev/null \
+    || echo "[!] Failed: x8 (non-fatal)"
+else
+    echo "[+] x8 already installed."
+fi
+
+# ── getJS (npm) ───────────────────────────────────────────────────────────
+
+echo ""
+echo "[+] Installing getJS (npm)..."
+if ! command -v getJS &>/dev/null; then
+    npm install -g getjs 2>/dev/null && echo "[+] getJS installed." || echo "[!] Failed: getjs (non-fatal)"
+fi
+
 # ── Python packages ────────────────────────────────────────────────────────
+
+export PROJECT_ROOT
 
 if [ -f "$PROJECT_ROOT/installers/install_pip.sh" ]; then
     bash "$PROJECT_ROOT/installers/install_pip.sh"
 else
-    echo "[!] install_pip.sh not found in installers/ directory"
+    echo "[!] install_pip.sh not found — skipping Python tools"
 fi
 
 # ── External scripts ───────────────────────────────────────────────────────
@@ -184,7 +283,7 @@ fi
 if [ -f "$PROJECT_ROOT/installers/install_external.sh" ]; then
     bash "$PROJECT_ROOT/installers/install_external.sh"
 else
-    echo "[!] install_external.sh not found in installers/ directory"
+    echo "[!] install_external.sh not found — skipping external scripts"
 fi
 
 # ── Wordlists ──────────────────────────────────────────────────────────────
@@ -194,7 +293,6 @@ echo "[+] Setting up wordlists..."
 sudo mkdir -p /usr/share/wordlists
 
 WORDLIST_DIR="$PROJECT_ROOT"
-# Figure out the project wordlists dir
 if [ -d "$PROJECT_ROOT/wordlists" ]; then
     WORDLIST_DIR="$PROJECT_ROOT/wordlists"
 elif [ -d "$PROJECT_ROOT/src/venomrecon/wordlists" ]; then
@@ -203,51 +301,34 @@ fi
 
 if [ ! -d "/usr/share/wordlists/seclists" ]; then
     echo "    -> Cloning SecLists (~1.5 GB)..."
-    sudo git clone --depth 1 https://github.com/danielmiessler/SecLists.git /usr/share/wordlists/seclists 2>/dev/null || true
+    sudo git clone --depth 1 https://github.com/danielmiessler/SecLists.git \
+         /usr/share/wordlists/seclists 2>/dev/null || true
 else
     echo "    -> SecLists already present."
 fi
 
-# Symlink/copy key SecLists files into the project wordlists dir if missing
 if [ -d "/usr/share/wordlists/seclists" ]; then
-    # DNS wordlists (tiered)
-    [ ! -f "$WORDLIST_DIR/dns.txt" ] && \
-        ln -sf /usr/share/wordlists/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
-               "$WORDLIST_DIR/dns.txt" 2>/dev/null || true
-
-    [ ! -f "$WORDLIST_DIR/dns_medium.txt" ] && \
-        ln -sf /usr/share/wordlists/seclists/Discovery/DNS/subdomains-top1million-20000.txt \
-               "$WORDLIST_DIR/dns_medium.txt" 2>/dev/null || true
-
-    [ ! -f "$WORDLIST_DIR/dns_large.txt" ] && \
-        ln -sf /usr/share/wordlists/seclists/Discovery/DNS/subdomains-top1million-110000.txt \
-               "$WORDLIST_DIR/dns_large.txt" 2>/dev/null || true
-
-    # VHosts wordlist
-    [ ! -f "$WORDLIST_DIR/vhosts.txt" ] && \
-        ln -sf /usr/share/wordlists/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
-               "$WORDLIST_DIR/vhosts.txt" 2>/dev/null || true
-
-    # Params wordlist
-    [ ! -f "$WORDLIST_DIR/params.txt" ] && \
-        ln -sf /usr/share/wordlists/seclists/Discovery/Web-Content/burp-parameter-names.txt \
-               "$WORDLIST_DIR/params.txt" 2>/dev/null || true
+    _symlink() {
+        [ ! -f "$2" ] && ln -sf "$1" "$2" 2>/dev/null || true
+    }
+    _symlink /usr/share/wordlists/seclists/Discovery/DNS/subdomains-top1million-5000.txt     "$WORDLIST_DIR/dns.txt"
+    _symlink /usr/share/wordlists/seclists/Discovery/DNS/subdomains-top1million-20000.txt    "$WORDLIST_DIR/dns_medium.txt"
+    _symlink /usr/share/wordlists/seclists/Discovery/DNS/subdomains-top1million-110000.txt   "$WORDLIST_DIR/dns_large.txt"
+    _symlink /usr/share/wordlists/seclists/Discovery/DNS/subdomains-top1million-5000.txt     "$WORDLIST_DIR/vhosts.txt"
+    _symlink /usr/share/wordlists/seclists/Discovery/Web-Content/burp-parameter-names.txt   "$WORDLIST_DIR/params.txt"
 fi
 
-# Download a public resolvers list if missing
 if [ ! -f "$WORDLIST_DIR/resolvers.txt" ]; then
     echo "    -> Downloading resolvers.txt..."
     curl -sL "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt" \
          -o "$WORDLIST_DIR/resolvers.txt" 2>/dev/null || true
 fi
 
-# ── nuclei templates update ────────────────────────────────────────────────
+# ── nuclei templates & gf patterns ────────────────────────────────────────
 
 echo ""
 echo "[+] Updating nuclei templates..."
 nuclei -update-templates -silent 2>/dev/null || true
-
-# ── GF patterns ────────────────────────────────────────────────────────────
 
 echo ""
 echo "[+] Installing gf patterns..."
@@ -274,11 +355,8 @@ echo "============================================="
 echo "[SUCCESS] VenomRecon v1.0 install complete!"
 echo ""
 echo "Next steps:"
-echo "  1. source ~/.bashrc   (to load Go PATH)"
-echo "  2. export GITHUB_TOKEN=ghp_xxxx"
-echo "  3. export SHODAN_API_KEY=xxxx  (optional)"
-echo "  4. export CHAOS_API_KEY=xxxx   (optional)"
-echo "  5. export BEVIGIL_API_KEY=xxxx (optional)"
-echo "  6. python3 src/venomrecon/main.py --doctor"
-echo "  7. python3 src/venomrecon/main.py -d target.com --agree-tos"
+echo "  1. source ~/.bashrc   (to reload PATH)"
+echo "  2. cd $PROJECT_ROOT"
+echo "  3. python3 src/venomrecon/main.py --doctor"
+echo "  4. python3 src/venomrecon/main.py -d target.com --agree-tos"
 echo "============================================="
