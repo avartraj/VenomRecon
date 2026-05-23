@@ -2,11 +2,13 @@
 
 VenomRecon is an autonomous Bug Bounty Reconnaissance Automation Framework built in Python. It orchestrates 60+ external OSINT and security tools across a 13-phase pipeline, mapping the full attack surface, extracting secrets, and running 105+ active vulnerability checks without you touching a single command between phases.
 
-## Authorized Use Only
+### Authorized Use Only
 
 Use VenomRecon strictly on assets you own or where you have explicit written permission to test. Unauthorized use is illegal and unethical.
 
-<img width="1672" height="941" alt="image" src="https://github.com/user-attachments/assets/a5ec7dd5-0035-4feb-96a8-a6498bae06c9" />
+
+<img width="1280" height="702" alt="image" src="https://github.com/user-attachments/assets/dee67cc2-5db6-4a96-8e54-879bc85ba7c8" />
+
 
 ---
 
