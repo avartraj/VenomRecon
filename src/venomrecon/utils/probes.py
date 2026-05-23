@@ -1,13 +1,7 @@
 """
-utils/probes.py – Pure-Python, thread-safe probe functions for VenomRecon v1.0.
-
-All probes:
-  - Accept file paths of hosts/URLs as input.
-  - Return list[Finding] and write findings to an outfile.
-  - Use only stdlib (urllib.request, ssl, socket, re, json, base64).
-  - Are safe to run inside ThreadPoolExecutor.
-  - Respect a configurable timeout (default 10 s).
+utils/probes.py – Aggressive bug bounty recon probe suite (VenomRecon v1.0)
 """
+
 from __future__ import annotations
 
 import base64
@@ -18,30 +12,33 @@ import socket
 import ssl
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional
 
-
-# ---------------------------------------------------------------------------
-# Finding dataclass
-# ---------------------------------------------------------------------------
+# Data model
 
 @dataclass
 class Finding:
     check_name: str
     url: str
-    severity: str   # critical / high / medium / low / info
+    severity: str
     evidence: str
     verified: bool = False
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+# Globals
 
 _UNVERIFIED_CTX = ssl._create_unverified_context()
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
+_NOISE_DOMAINS = {
+    "googleapis.com", "cloudflare.com", "amazonaws.com",
+    "fastly.net", "akamaiedge.net", "googletagmanager.com",
+    "google-analytics.com", "facebook.com", "twitter.com",
+}
+
+
+# Core helpers
 
 def _load_lines(path: str) -> List[str]:
     if not os.path.isfile(path):
@@ -54,33 +51,37 @@ def _write_findings(findings: List[Finding], outfile: str) -> None:
     if not findings:
         return
     os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
-    with open(outfile, "a", encoding="utf-8") as fh:
+    with open(outfile, "a", encoding="utf-8", newline="\n") as fh:
         for f in findings:
             status = "[VERIFIED]" if f.verified else ""
             fh.write(f"[{f.severity.upper()}]{status} [{f.check_name}] {f.url} | {f.evidence}\n")
 
 
-def _get(url: str, timeout: int = 10, headers: dict = None,
-         method: str = "GET", data: bytes = None) -> tuple[int, dict, str]:
-    """
-    Minimal HTTP request. Returns (status_code, headers_dict, body_str).
-    Returns (-1, {}, '') on any error.
-    """
+def _get(
+    url: str,
+    timeout: int = 10,
+    headers: Optional[dict] = None,
+    method: str = "GET",
+    data: Optional[bytes] = None,
+) -> tuple[int, dict, str]:
     try:
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("User-Agent", _UA)
+
         if headers:
             for k, v in headers.items():
                 req.add_header(k, v)
+
         with urllib.request.urlopen(req, timeout=timeout, context=_UNVERIFIED_CTX) as resp:
-            body = resp.read(4096).decode("utf-8", errors="ignore")
-            return resp.status, dict(resp.headers), body
+            return resp.status, dict(resp.headers), resp.read(4096).decode("utf-8", errors="ignore")
+
     except urllib.error.HTTPError as e:
         try:
             body = e.read(2048).decode("utf-8", errors="ignore")
         except Exception:
             body = ""
         return e.code, dict(e.headers), body
+
     except Exception:
         return -1, {}, ""
 
@@ -91,63 +92,94 @@ def _ensure_scheme(host: str) -> str:
     return f"https://{host.rstrip('/')}"
 
 
-# ---------------------------------------------------------------------------
-# 1. GraphQL probes
-# ---------------------------------------------------------------------------
+# GraphQL
 
-GRAPHQL_PATHS = ["/graphql", "/api/graphql", "/graphql/v1", "/graphiql", "/playground", "/api/v1/graphql"]
+GRAPHQL_PATHS = [
+    "/graphql", "/api/graphql", "/graphql/v1",
+    "/graphiql", "/playground", "/api/v1/graphql"
+]
 
 
 def probe_graphql_native(hosts_file: str, outdir: str) -> None:
-    """Discover GraphQL endpoints on each host and save to outdir/graphql_endpoints.txt."""
     found = []
     for host in _load_lines(hosts_file):
         base = _ensure_scheme(host)
         for path in GRAPHQL_PATHS:
             code, _, body = _get(f"{base}{path}", timeout=8)
-            if code in (200, 400) and ("graphql" in body.lower() or "__schema" in body.lower() or "query" in body.lower()):
+            if code in (200, 400) and ("graphql" in body.lower() or "__schema" in body):
                 found.append(f"{base}{path}")
+
     outfile = os.path.join(outdir, "graphql_endpoints.txt")
-    with open(outfile, "w", encoding="utf-8") as fh:
+    with open(outfile, "a", encoding="utf-8") as fh:
         fh.write("\n".join(found) + ("\n" if found else ""))
 
 
 def graphql_introspection_probe(endpoints_file: str, outfile: str) -> List[Finding]:
-    """Send introspection query. Finding if __Schema types returned."""
     findings = []
     payload = json.dumps({"query": "{__schema{types{name}}}"}).encode()
+
     for ep in _load_lines(endpoints_file):
-        code, _, body = _get(ep, timeout=10, headers={"Content-Type": "application/json"}, method="POST", data=payload)
+        code, _, body = _get(
+            ep,
+            timeout=10,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+            data=payload,
+        )
+
         if code == 200 and "__Schema" in body:
-            findings.append(Finding("graphql_introspection", ep, "medium",
-                                    "GraphQL introspection is enabled", verified=True))
+            findings.append(Finding(
+                "graphql_introspection",
+                ep,
+                "medium",
+                "Introspection enabled (GRAPHQL EXPOSED)",
+                True
+            ))
+
     _write_findings(findings, outfile)
     return findings
 
 
 def graphql_batch_probe(endpoints_file: str, outfile: str) -> List[Finding]:
-    """Send batched query array. Finding if both queries are answered."""
     findings = []
-    payload = json.dumps([{"query": "{__typename}"}, {"query": "{__typename}"}]).encode()
+    payload = json.dumps([
+        {"query": "{__typename}"},
+        {"query": "{__typename}"}
+    ]).encode()
+
     for ep in _load_lines(endpoints_file):
-        code, _, body = _get(ep, timeout=10, headers={"Content-Type": "application/json"}, method="POST", data=payload)
+        code, _, body = _get(
+            ep,
+            timeout=10,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+            data=payload,
+        )
+
         if code == 200 and body.strip().startswith("["):
-            findings.append(Finding("graphql_batch", ep, "low",
-                                    "GraphQL batch queries accepted", verified=True))
+            findings.append(Finding(
+                "graphql_batch",
+                ep,
+                "low",
+                "Batch queries accepted (possible abuse surface)",
+                True
+            ))
+
     _write_findings(findings, outfile)
     return findings
 
 
-# ---------------------------------------------------------------------------
-# 2. API versioning probe
-# ---------------------------------------------------------------------------
+# API probing 
 
-API_PATHS = ["/api/v1", "/api/v2", "/api/v3", "/v1", "/v2", "/v3",
-             "/api", "/rest", "/api/latest", "/api/internal", "/api/dev"]
+API_PATHS = [
+    "/api/v1", "/api/v2", "/api/v3",
+    "/v1", "/v2", "/v3",
+    "/api", "/rest",
+    "/api/latest", "/api/internal", "/api/dev"
+]
 
 
 def probe_api_versions_native(hosts_file: str, outdir: str) -> None:
-    """Probe common API versioning paths. Save 200/401 findings."""
     found = []
     for host in _load_lines(hosts_file):
         base = _ensure_scheme(host)
@@ -155,139 +187,93 @@ def probe_api_versions_native(hosts_file: str, outdir: str) -> None:
             code, _, _ = _get(f"{base}{path}", timeout=7)
             if code in (200, 401, 403):
                 found.append(f"{base}{path} [{code}]")
+
     outfile = os.path.join(outdir, "api_version_endpoints.txt")
-    with open(outfile, "a", encoding="utf-8") as fh:
+    with open(outfile, "a", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(found) + ("\n" if found else ""))
 
 
-# ---------------------------------------------------------------------------
-# 3. WebSocket detection
-# ---------------------------------------------------------------------------
+# WebSocket detection
 
 def probe_websocket_native(urls_file: str, outdir: str) -> None:
-    """Detect ws:// / wss:// references in crawled content and log them."""
     ws_re = re.compile(r'(wss?://[\w./:@\-?=#&%+]+)', re.IGNORECASE)
     found = set()
+
     for line in _load_lines(urls_file):
-        for match in ws_re.findall(line):
-            found.add(match)
+        found.update(ws_re.findall(line))
+
     outfile = os.path.join(outdir, "websocket_endpoints.txt")
     with open(outfile, "w", encoding="utf-8") as fh:
         fh.write("\n".join(sorted(found)) + ("\n" if found else ""))
 
 
-# ---------------------------------------------------------------------------
-# 4. Vhost fuzzing helper
-# ---------------------------------------------------------------------------
+# Favicon hashing (Shodan chain preserved)
 
-def run_vhost_fuzz(hosts_file: str, base_domain: str, outdir: str,
-                   vhosts_wordlist: str = "") -> None:
-    """
-    Runs ffuf vhost fuzzing for each host.
-    Delegates to ffuf subprocess; this function builds the command.
-    """
-    from core.runner import run
-    hosts = _load_lines(hosts_file)
-    if not hosts or not vhosts_wordlist or not os.path.isfile(vhosts_wordlist):
-        return
-    outfile = os.path.join(outdir, "vhost_results.txt")
-    for host in hosts[:5]:  # cap at 5 targets
-        base = _ensure_scheme(host)
-        run(
-            ["ffuf", "-u", base, "-H", f"Host: FUZZ.{base_domain}",
-             "-w", vhosts_wordlist, "-mc", "200,301,302,401,403",
-             "-o", outfile, "-of", "json"],
-            timeout=300,
-        )
+def _mmh3_hash(data: bytes) -> Optional[str]:
+    try:
+        import mmh3
+        return str(mmh3.hash(base64.b64encode(data)))
+    except ImportError:
+        return None
 
-
-# ---------------------------------------------------------------------------
-# 5. Favicon hash collector
-# ---------------------------------------------------------------------------
 
 def collect_favicon_hashes(hosts_file: str, outfile: str) -> None:
-    """Fetch /favicon.ico from each host and compute mmh3 hash (or MD5 fallback)."""
-    import hashlib
     lines = []
+    warned = False
+
     for host in _load_lines(hosts_file):
         base = _ensure_scheme(host)
         try:
             req = urllib.request.Request(f"{base}/favicon.ico")
             req.add_header("User-Agent", _UA)
+
             with urllib.request.urlopen(req, timeout=8, context=_UNVERIFIED_CTX) as resp:
                 data = resp.read()
-            if data:
-                # Use MD5 as mmh3 fallback (no external deps)
-                h = hashlib.md5(base64.b64encode(data)).hexdigest()
+
+            h = _mmh3_hash(data)
+            if h:
                 lines.append(f"{host} {h}")
+            elif not warned:
+                warned = True
+
         except Exception:
-            pass
+            continue
+
     os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
     with open(outfile, "a", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + ("\n" if lines else ""))
 
-
-def favicon_hash_shodan_lookup(hashes_file: str, outdir: str) -> None:
-    """For each hash, query Shodan. Requires SHODAN_API_KEY env var."""
-    from core.config import config
-    if not config.shodan_api_key:
-        return
-    outfile = os.path.join(outdir, "favicon_shodan.txt")
-    seen_hashes: set = set()
-    for line in _load_lines(hashes_file):
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        h = parts[1]
-        if h in seen_hashes:
-            continue
-        seen_hashes.add(h)
-        url = f"https://api.shodan.io/shodan/host/search?key={config.shodan_api_key}&query=http.favicon.hash:{h}"
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": _UA})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="ignore"))
-                ips = [m.get("ip_str", "") for m in data.get("matches", []) if m.get("ip_str")]
-                if ips:
-                    with open(outfile, "a", encoding="utf-8") as fh:
-                        fh.write(f"Hash {h}: {', '.join(ips)}\n")
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
-# 6. Security headers audit
-# ---------------------------------------------------------------------------
+# Security headers (intentionally noisy)
 
 SECURITY_HEADERS = [
-    ("strict-transport-security", "medium", "Missing HSTS header"),
-    ("x-frame-options", "low", "Missing X-Frame-Options header"),
-    ("x-content-type-options", "low", "Missing X-Content-Type-Options header"),
-    ("content-security-policy", "medium", "Missing Content-Security-Policy header"),
-    ("permissions-policy", "low", "Missing Permissions-Policy header"),
-    ("referrer-policy", "low", "Missing Referrer-Policy header"),
+    ("strict-transport-security", "medium", "Missing HSTS"),
+    ("x-frame-options", "low", "Missing XFO"),
+    ("x-content-type-options", "low", "Missing XCTO"),
+    ("content-security-policy", "medium", "Missing CSP"),
+    ("permissions-policy", "low", "Missing PP"),
+    ("referrer-policy", "low", "Missing RP"),
 ]
 
 
 def security_headers_audit(hosts_file: str, outfile: str) -> List[Finding]:
-    """Check each host for missing security response headers."""
     findings = []
+
     for host in _load_lines(hosts_file):
         base = _ensure_scheme(host)
-        code, resp_headers, _ = _get(base, timeout=10)
+        code, headers, _ = _get(base, timeout=10)
+
         if code < 0:
             continue
-        lower_headers = {k.lower(): v for k, v in resp_headers.items()}
-        for header, severity, desc in SECURITY_HEADERS:
-            if header not in lower_headers:
-                findings.append(Finding("security_headers", base, severity, desc))
+
+        lower = {k.lower(): v for k, v in headers.items()}
+
+        for h, sev, desc in SECURITY_HEADERS:
+            if h not in lower:
+                findings.append(Finding("security_headers", base, sev, desc))
+
     _write_findings(findings, outfile)
     return findings
-
-
-# ---------------------------------------------------------------------------
 # 7. TLS audit
-# ---------------------------------------------------------------------------
 
 def tls_audit_native(hosts_file: str, outfile: str) -> List[Finding]:
     """Check for expired certs, self-signed, TLS < 1.2, missing HSTS."""
@@ -303,11 +289,20 @@ def tls_audit_native(hosts_file: str, outfile: str) -> List[Finding]:
                     proto = ssock.version()
                     not_after = cert.get("notAfter", "")
                     if not_after:
-                        exp = datetime.datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
-                        if exp < datetime.datetime.utcnow():
-                            findings.append(Finding("tls_audit", host, "high", f"Certificate expired on {not_after}"))
-                    if proto and proto < "TLSv1.2":
-                        findings.append(Finding("tls_audit", host, "medium", f"Weak TLS version: {proto}"))
+                        # FIX-3: datetime.utcnow() is deprecated in Python 3.12+ and
+                        # produces a naive datetime that can behave incorrectly across
+                        # DST boundaries or when the system clock is in a non-UTC zone.
+                        # Parse the cert timestamp as UTC and compare against an
+                        # explicit timezone-aware datetime.now(UTC) instead.
+                        exp = datetime.datetime.strptime(not_after, "%b %d %H:%M:%S %Y GMT")
+                        exp = exp.replace(tzinfo=datetime.timezone.utc)
+                        now = datetime.datetime.now(datetime.timezone.utc)
+                        if exp < now:
+                            findings.append(Finding("tls_audit", host, "high",
+                                                    f"Certificate expired on {not_after}"))
+                    if proto and proto not in ("TLSv1.2", "TLSv1.3"):
+                        findings.append(Finding("tls_audit", host, "medium",
+                                                f"Weak TLS version: {proto}"))
         except ssl.SSLCertVerificationError as e:
             if "self signed" in str(e).lower() or "self-signed" in str(e).lower():
                 findings.append(Finding("tls_audit", host, "medium", "Self-signed certificate detected"))
@@ -317,12 +312,13 @@ def tls_audit_native(hosts_file: str, outfile: str) -> List[Finding]:
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 8. Email security: SPF / DMARC / DKIM
-# ---------------------------------------------------------------------------
 
 def _dns_txt(domain: str, timeout: int = 8) -> List[str]:
     """Resolve DNS TXT records for domain using socket/stdlib."""
+    import shutil
+    if not shutil.which("dig"):
+        return []
     import subprocess
     try:
         result = subprocess.run(
@@ -353,7 +349,7 @@ def check_spf_record(domain: str, outfile: str) -> List[Finding]:
 def check_dmarc_record(domain: str, outfile: str) -> List[Finding]:
     """Check DMARC record. Finding if missing or p=none."""
     findings = []
-    records = _dns_txt(f"_dmarc.{domain}")
+    records = _dns_txt(f"_dmarc.{domain.strip()}")
     dmarc = [r for r in records if r.startswith("v=DMARC1")]
     if not dmarc:
         findings.append(Finding("dmarc_check", domain, "medium", "No DMARC record found"))
@@ -385,18 +381,21 @@ def check_dkim_record(domain: str, outfile: str) -> List[Finding]:
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 9. DNS zone transfer
-# ---------------------------------------------------------------------------
 
-def attempt_zone_transfer(subdomains_file: str, outfile: str) -> List[Finding]:
+def attempt_zone_transfer(subdomains_file: str, outfile: str,
+                          root_domain: str = "") -> List[Finding]:
     """For the root domain, attempt AXFR on each NS record."""
     import subprocess
     findings = []
     domains = _load_lines(subdomains_file)
-    if not domains:
+    if not domains and not root_domain:
         return findings
-    root = domains[0]  # first entry should be root domain
+
+    root = root_domain.lstrip("*.") if root_domain else (domains[0] if domains else "")
+    if not root:
+        return findings
+
     try:
         ns_result = subprocess.run(
             ["dig", "+short", "NS", root],
@@ -405,20 +404,21 @@ def attempt_zone_transfer(subdomains_file: str, outfile: str) -> List[Finding]:
         nameservers = [l.strip().rstrip(".") for l in ns_result.stdout.splitlines() if l.strip()]
     except Exception:
         nameservers = []
+
     for ns in nameservers:
         try:
             axfr = subprocess.run(
                 ["dig", "AXFR", root, f"@{ns}"],
                 capture_output=True, text=True, timeout=15
             )
-            if "XFR size" in axfr.stdout or "Transfer failed" not in axfr.stdout:
-                if len(axfr.stdout.strip()) > 100:
-                    findings.append(Finding("zone_transfer", root, "high",
-                                            f"Zone transfer succeeded via {ns}", verified=True))
-                    with open(outfile, "a", encoding="utf-8") as fh:
-                        fh.write(f"=== AXFR from {ns} ===\n{axfr.stdout}\n")
+            if "XFR size" in axfr.stdout and len(axfr.stdout.strip()) > 100:
+                findings.append(Finding("zone_transfer", root, "high",
+                                        f"Zone transfer succeeded via {ns}", verified=True))
+                with open(outfile, "a", encoding="utf-8", newline="\n") as fh:
+                    fh.write(f"=== AXFR from {ns} ===\n{axfr.stdout}\n")
         except Exception:
             pass
+
     _write_findings(findings, outfile)
     return findings
 
@@ -432,7 +432,7 @@ def check_dnssec(domain: str, outfile: str) -> List[Finding]:
             ["dig", "+short", "DNSKEY", domain],
             capture_output=True, text=True, timeout=8
         )
-        if not result.stdout.strip():
+        if "DNSKEY" not in result.stdout:
             findings.append(Finding("dnssec_check", domain, "info",
                                     "DNSSEC not configured (no DNSKEY records)"))
     except Exception:
@@ -441,9 +441,7 @@ def check_dnssec(domain: str, outfile: str) -> List[Finding]:
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 10. CORS native probe
-# ---------------------------------------------------------------------------
 
 def cors_native_probe(hosts_file: str, outfile: str) -> List[Finding]:
     """Test CORS with evil.com, null, and reflective origins."""
@@ -466,9 +464,7 @@ def cors_native_probe(hosts_file: str, outfile: str) -> List[Finding]:
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 11. Host header injection
-# ---------------------------------------------------------------------------
 
 def host_header_injection_probe(hosts_file: str, outfile: str) -> List[Finding]:
     """Inject evil Host header and check for reflection or redirect."""
@@ -477,7 +473,7 @@ def host_header_injection_probe(hosts_file: str, outfile: str) -> List[Finding]:
     for host in _load_lines(hosts_file):
         base = _ensure_scheme(host)
         code, resp_headers, body = _get(base, timeout=8,
-                                         headers={"Host": evil, "X-Forwarded-Host": evil})
+                                        headers={"Host": evil, "X-Forwarded-Host": evil})
         location = resp_headers.get("Location", "") or resp_headers.get("location", "")
         if evil in body or evil in location:
             findings.append(Finding("host_header_injection", base, "medium",
@@ -486,9 +482,7 @@ def host_header_injection_probe(hosts_file: str, outfile: str) -> List[Finding]:
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 12. NoSQL injection native probe
-# ---------------------------------------------------------------------------
 
 def nosqli_native_probe(params_file: str, outfile: str) -> List[Finding]:
     """Inject NoSQL operators into query parameters."""
@@ -504,7 +498,7 @@ def nosqli_native_probe(params_file: str, outfile: str) -> List[Finding]:
             new_qsl = [(k, payload) for k, _ in qsl]
             test_url = urlunparse(parsed._replace(query=urlencode(new_qsl)))
             code, _, body = _get(test_url, timeout=8)
-            if code == 200 and len(body) > 50:
+            if code == 200 and len(body) > 300:
                 findings.append(Finding("nosqli_native", url, "high",
                                         f"Possible NoSQL injection: payload={payload[:30]} status={code}"))
                 break
@@ -512,9 +506,7 @@ def nosqli_native_probe(params_file: str, outfile: str) -> List[Finding]:
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 13. Path traversal probes
-# ---------------------------------------------------------------------------
 
 LFI_PAYLOADS = [
     "../../../../etc/passwd",
@@ -568,9 +560,7 @@ def lfi_encoded_probe(params_file: str, outfile: str) -> List[Finding]:
     return _lfi_check(params_file, LFI_ENCODED_PAYLOADS, outfile, "lfi_encoded")
 
 
-# ---------------------------------------------------------------------------
 # 14. SSRF probes
-# ---------------------------------------------------------------------------
 
 def ssrf_oob_probe(params_file: str, interactsh_host: str, outfile: str) -> List[Finding]:
     """Replace param values with OOB interactsh URL and fire requests."""
@@ -587,9 +577,8 @@ def ssrf_oob_probe(params_file: str, interactsh_host: str, outfile: str) -> List
             new_qsl[idx] = (k, oob_url)
             test_url = urlunparse(parsed._replace(query=urlencode(new_qsl)))
             _get(test_url, timeout=5)
-        # Note: actual OOB detection happens via interactsh-client monitor
         findings.append(Finding("ssrf_oob", url, "info",
-                                f"SSRF OOB payload sent to {interactsh_host}"))
+                                f"OOB probe sent (no verification performed): {interactsh_host}"))
     _write_findings(findings, outfile)
     return findings
 
@@ -611,7 +600,7 @@ IMDS_MARKERS = {
 def ssrf_metadata_probe(params_file: str, metadata_url: str, outfile: str) -> List[Finding]:
     """Replace param values with IMDS endpoint URL. Check for metadata in response."""
     findings = []
-    provider = next((k for k, v in IMDS_URLS.items() if v == metadata_url), "unknown")
+    provider = next((k for k, v in IMDS_URLS.items() if metadata_url.startswith(v)), "unknown")
     markers = IMDS_MARKERS.get(provider, [])
     from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
     for url in _load_lines(params_file):
@@ -629,9 +618,7 @@ def ssrf_metadata_probe(params_file: str, metadata_url: str, outfile: str) -> Li
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 15. Open redirect probe
-# ---------------------------------------------------------------------------
 
 REDIRECT_PAYLOADS = [
     "//evil.com",
@@ -665,9 +652,7 @@ def open_redirect_probe(params_file: str, outfile: str) -> List[Finding]:
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 16. SSTI native probe
-# ---------------------------------------------------------------------------
 
 SSTI_PAYLOADS = [
     ("{{7*7}}", "49"),
@@ -699,9 +684,7 @@ def ssti_native_probe(params_file: str, outfile: str) -> List[Finding]:
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 17. Native reflection check
-# ---------------------------------------------------------------------------
 
 def native_reflection_check(params_file: str, outfile: str) -> List[Finding]:
     """Send unique canary token in each param, check if it reflects."""
@@ -724,9 +707,7 @@ def native_reflection_check(params_file: str, outfile: str) -> List[Finding]:
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 18. Spring Boot actuator probe
-# ---------------------------------------------------------------------------
 
 ACTUATOR_PATHS = [
     "/actuator", "/actuator/env", "/actuator/mappings",
@@ -751,9 +732,7 @@ def spring_actuator_probe(hosts_file: str, outfile: str) -> List[Finding]:
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 19. Cache deception probe
-# ---------------------------------------------------------------------------
 
 def cache_deception_probe(hosts_file: str, outfile: str) -> List[Finding]:
     """Append static suffixes to see if sensitive content gets cached."""
@@ -767,16 +746,14 @@ def cache_deception_probe(hosts_file: str, outfile: str) -> List[Finding]:
         for suffix in suffixes:
             code, resp_headers, body = _get(f"{base}{suffix}", timeout=8)
             cache_ctrl = resp_headers.get("Cache-Control", "") or resp_headers.get("cache-control", "")
-            if code == 200 and len(body) > 50 and "public" in cache_ctrl.lower():
+            if code == 200 and len(body) > 200 and "public" in cache_ctrl.lower():
                 findings.append(Finding("cache_deception", f"{base}{suffix}", "medium",
                                         f"Possible cache deception: Cache-Control: {cache_ctrl}"))
     _write_findings(findings, outfile)
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 20. H2C smuggling probe
-# ---------------------------------------------------------------------------
 
 def h2c_smuggling_probe(hosts_file: str, outfile: str) -> List[Finding]:
     """Probe for HTTP/2 cleartext upgrade acceptance."""
@@ -785,7 +762,8 @@ def h2c_smuggling_probe(hosts_file: str, outfile: str) -> List[Finding]:
         base = _ensure_scheme(host)
         code, resp_headers, _ = _get(
             base, timeout=8,
-            headers={"Upgrade": "h2c", "HTTP2-Settings": "AAMAAABkAAQAAP__", "Connection": "Upgrade, HTTP2-Settings"}
+            headers={"Upgrade": "h2c", "HTTP2-Settings": "AAMAAABkAAQAAP__",
+                     "Connection": "Upgrade, HTTP2-Settings"}
         )
         upgrade_hdr = resp_headers.get("Upgrade", "") or resp_headers.get("upgrade", "")
         if code == 101 or "h2c" in upgrade_hdr.lower():
@@ -795,9 +773,7 @@ def h2c_smuggling_probe(hosts_file: str, outfile: str) -> List[Finding]:
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 21. Error disclosure probe
-# ---------------------------------------------------------------------------
 
 ERROR_MARKERS = [
     "traceback", "stack trace", "exception in thread", "at org.springframework",
@@ -811,7 +787,6 @@ def error_disclosure_probe(hosts_file: str, outfile: str) -> List[Finding]:
     findings = []
     for host in _load_lines(hosts_file):
         base = _ensure_scheme(host)
-        # Send invalid Content-Type with large random body
         _, _, body = _get(base, timeout=8,
                           headers={"Content-Type": "application/x-venomrecon-invalid"},
                           method="POST", data=b"A" * 512)
@@ -825,39 +800,36 @@ def error_disclosure_probe(hosts_file: str, outfile: str) -> List[Finding]:
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 22. Broken link hijacking
-# ---------------------------------------------------------------------------
 
 def broken_link_hijack_check(urls_file: str, outfile: str) -> List[Finding]:
     """Find external links where the domain is unregistered (NXDOMAIN)."""
     findings = []
     ext_re = re.compile(r'https?://([\w.-]+)', re.IGNORECASE)
     checked: set = set()
+
     for line in _load_lines(urls_file):
-        m = ext_re.search(line)
-        if not m:
-            continue
-        domain = m.group(1).lower()
-        if domain in checked:
-            continue
-        checked.add(domain)
-        # Skip our own common domains
-        if any(tld in domain for tld in [".com", ".org", ".net"]):
-            try:
-                socket.getaddrinfo(domain, None, socket.AF_INET)
-            except socket.gaierror:
-                findings.append(Finding("broken_link_hijack", line, "medium",
-                                        f"Unregistered domain in outbound link: {domain}"))
-        if len(checked) > 200:
-            break
+        for m in ext_re.finditer(line):
+            domain = m.group(1).lower()
+            if domain in checked:
+                continue
+            checked.add(domain)
+            if "." in domain and not domain.replace(".", "").isdigit():
+                if not any(noise in domain for noise in _NOISE_DOMAINS):
+                    try:
+                        socket.gethostbyname(domain)
+                    except socket.gaierror:
+                        findings.append(Finding("broken_link_hijack", line, "medium",
+                                                f"Unregistered domain in outbound link: {domain}"))
+            if len(checked) > 200:
+                _write_findings(findings, outfile)
+                return findings
+
     _write_findings(findings, outfile)
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 23. IDOR ID fuzz probe
-# ---------------------------------------------------------------------------
 
 def idor_id_fuzz_probe(params_file: str, outfile: str) -> List[Finding]:
     """For id/user_id/account_id params, try id+1, id-1, id=0."""
@@ -881,7 +853,7 @@ def idor_id_fuzz_probe(params_file: str, outfile: str) -> List[Finding]:
                 test_url = urlunparse(parsed._replace(query=urlencode(new_qsl)))
                 code, _, body = _get(test_url, timeout=8)
                 delta = abs(len(body) - orig_len)
-                if code == 200 and delta > 100:
+                if code == 200 and orig_len > 100 and delta / orig_len > 0.6:
                     findings.append(Finding("idor_id_fuzz", url, "medium",
                                             f"IDOR candidate: param={k} probe={probe_val} delta={delta}"))
                     break
@@ -889,9 +861,7 @@ def idor_id_fuzz_probe(params_file: str, outfile: str) -> List[Finding]:
     return findings
 
 
-# ---------------------------------------------------------------------------
 # 24. WordPress target detection
-# ---------------------------------------------------------------------------
 
 def detect_wordpress_targets(httpx_json: str, outfile: str) -> None:
     """Parse httpx tech-detect JSON. Extract hosts where tech includes WordPress."""
@@ -902,7 +872,7 @@ def detect_wordpress_targets(httpx_json: str, outfile: str) -> None:
         for line in fh:
             try:
                 data = json.loads(line)
-                techs = data.get("tech", []) or data.get("technologies", [])
+                techs = data.get("tech") or data.get("technologies") or []
                 if any("wordpress" in str(t).lower() for t in techs):
                     url = data.get("url", "") or data.get("input", "")
                     if url:
@@ -914,9 +884,7 @@ def detect_wordpress_targets(httpx_json: str, outfile: str) -> None:
         fh.write("\n".join(found) + ("\n" if found else ""))
 
 
-# ---------------------------------------------------------------------------
 # 25. RapidDNS and LeakIX passive scrapers
-# ---------------------------------------------------------------------------
 
 def fetch_rapiddns(domain: str, outfile: str) -> None:
     """Fetch subdomains from rapiddns.io."""
@@ -925,7 +893,10 @@ def fetch_rapiddns(domain: str, outfile: str) -> None:
         req = urllib.request.Request(url, headers={"User-Agent": _UA})
         with urllib.request.urlopen(req, timeout=30, context=_UNVERIFIED_CTX) as resp:
             content = resp.read().decode("utf-8", errors="ignore")
-        pattern = re.compile(r'([a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+' + re.escape(domain), re.IGNORECASE)
+        pattern = re.compile(
+            r'([a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+' + re.escape(domain),
+            re.IGNORECASE
+        )
         subs = sorted({m.group(0).lower() for m in pattern.finditer(content)})
         os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
         with open(outfile, "w", encoding="utf-8") as fh:
