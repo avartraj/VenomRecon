@@ -220,7 +220,7 @@ if ! command -v findomain &>/dev/null; then
         && echo "[+] findomain installed." \
         || echo "[!] Failed: findomain (non-fatal)"
     else
-        echo "[!] findomain: unsupported arch $arch — install manually"
+        echo "[!] findomain: unsupported arch $_arch — install manually"
     fi
 else
     echo "[+] findomain already installed."
