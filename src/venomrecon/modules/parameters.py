@@ -9,40 +9,44 @@ from core.config import config
 
 
 def run_phase(target: str, outdir: str):
-    logger.info("Phase 5: Parameter Discovery")
+    import shlex
+    logger.info("Phase 6: Parameter Discovery")
     all_crawled = f"{outdir}/all_crawled_urls.txt"
 
     if not os.path.isfile(all_crawled):
         logger.warning("all_crawled_urls.txt not found. Skipping Phase 5.")
         return
 
-    # Deduplicate and clean URLs with uro
+    # shlex.quote() to handle output directories that contain spaces or special chars.
     param_urls = f"{outdir}/param_urls.txt"
     run_pipe(
-        f"cat {all_crawled} | grep '?' | uro | sort -u",
-        output_file=param_urls
+        f"cat {shlex.quote(all_crawled)} | grep '?' | uro | sort -u",
+        validated_inputs={"all_crawled": all_crawled},
+        output_file=param_urls,
     )
 
-    # arjun – discover hidden parameters
-    if os.path.isfile(param_urls):
+    # arjun – discover hidden parameters (list form avoids shell quoting issues)
+    if not os.path.isfile(param_urls): return
         run(
-            f"arjun -i {param_urls} -oT {outdir}/arjun_params.txt 2>/dev/null",
-            timeout=600
+            ["arjun", "-i", param_urls, "-oT", f"{outdir}/arjun_params.txt"],
+            timeout=600,
         )
 
-    # paramspider
+    # paramspider (target is already validated by sanitize_domain())
     run(
-        f"paramspider --domain {target} --exclude woff,css,png,jpg,svg,ttf "
-        f"--output {outdir}/paramspider.txt 2>/dev/null",
-        timeout=300
+        ["paramspider", "--domain", target,
+         "--exclude", "woff,css,png,jpg,svg,ttf",
+         "--output", f"{outdir}/paramspider.txt"],
+        timeout=300,
     )
 
     # x8 – secret parameter discovery
-    if os.path.isfile(param_urls):
+    if not os.path.isfile(param_urls): return
         run(
-            f"x8 -u {param_urls} -w /usr/share/wordlists/seclists/Discovery/Web-Content/burp-parameter-names.txt "
-            f"--output {outdir}/x8_params.txt 2>/dev/null",
-            timeout=300
+            ["x8", "-l", param_urls,
+             "-w", "/usr/share/wordlists/seclists/Discovery/Web-Content/burp-parameter-names.txt",
+             "--output", f"{outdir}/x8_params.txt"],
+            timeout=300,
         )
 
     # gf pattern matching
@@ -58,11 +62,12 @@ def run_phase(target: str, outdir: str):
         "debug_logic": "debug_params.txt",
     }
 
-    if os.path.isfile(param_urls):
+    if not os.path.isfile(param_urls): return
         for pattern, outfile in gf_patterns.items():
             run_pipe(
-                f"cat {param_urls} | gf {pattern}",
-                output_file=f"{outdir}/{outfile}"
+                f"cat {shlex.quote(param_urls)} | gf {shlex.quote(pattern)}",
+                validated_inputs={"param_urls": param_urls, "pattern": pattern},
+                output_file=f"{outdir}/{outfile}",
             )
 
-    logger.success("Phase 5 complete. See param_urls.txt, arjun_params.txt, gf pattern files.")
+    logger.success("Phase 6 complete. See param_urls.txt, arjun_params.txt, gf pattern files.")
