@@ -25,9 +25,7 @@ from core import logger
 from core.config import config
 
 
-# ─────────────────────────────────────────────────────────────────
 # Helpers
-# ─────────────────────────────────────────────────────────────────
 
 missing_tools_run = set()
 
@@ -80,14 +78,21 @@ def _timeout_for(cmd: Union[str, List[str]], explicit: Optional[int]) -> int:
     return int(config.tool_timeouts.get(tool, config.tool_timeouts.get("default", 300)))
 
 
-def _start_process(cmd: Union[str, List[str]], shell: bool = True) -> subprocess.Popen:
+def _start_process(
+    cmd: Union[str, List[str]],
+    shell: bool = True,
+    stdin_data: Optional[str] = None,
+) -> subprocess.Popen:
     """
-    Start a process.  On POSIX we use os.setsid so we can kill the whole
-    process group cleanly; on Windows we use CREATE_NEW_PROCESS_GROUP.
+    BUG-07 FIX: Centralised process launcher — was defined but never used.
+    run() and run_pipe() now both call this instead of inlining the same
+    subprocess.Popen kwargs (with POSIX setsid / Windows process-group flag).
+    This eliminates duplicated process-launch logic that could drift independently.
     """
     kwargs: dict = dict(
         args=cmd,
         shell=shell,
+        stdin=subprocess.PIPE if stdin_data else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -111,9 +116,7 @@ def _kill(proc: subprocess.Popen):
         pass
 
 
-# ─────────────────────────────────────────────────────────────────
 # Primary run primitives
-# ─────────────────────────────────────────────────────────────────
 
 def run(
     cmd: Union[str, List[str]],
@@ -162,17 +165,7 @@ def run(
         time.sleep(config.inter_tool_delay)
     proc = None
     try:
-        proc = subprocess.Popen(
-            cmd,
-            shell=shell,
-            stdin=subprocess.PIPE if stdin_data else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            **({"preexec_fn": os.setsid} if os.name == "posix" else
-               {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}),
-        )
+        proc = _start_process(cmd, shell=shell, stdin_data=stdin_data)
         try:
             stdout, stderr = proc.communicate(input=stdin_data, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -225,16 +218,7 @@ def run_pipe(
         time.sleep(config.inter_tool_delay)
     proc = None
     try:
-        proc = subprocess.Popen(
-            cmd,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            **({"preexec_fn": os.setsid} if os.name == "posix" else
-               {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}),
-        )
+        proc = _start_process(cmd, shell=True)
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -379,9 +363,7 @@ def run_parallel_tasks(
     }
 
 
-# ─────────────────────────────────────────────────────────────────
 # File I/O utilities
-# ─────────────────────────────────────────────────────────────────
 
 def _write_output(path: str, content: str, append: bool = True):
     """Write content to *path*, creating parent dirs as needed."""
