@@ -11,7 +11,6 @@ import json
 import re
 import urllib.request
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from core import logger
 from core.runner import run, run_pipe, run_many, append_unique, read_lines
 from core.config import config
@@ -57,7 +56,7 @@ def fetch_wayback_subs(target: str, outfile: str) -> None:
         return
     logger.info("Fetching subdomains from Wayback CDX API...")
     try:
-        url = f"http://web.archive.org/cdx/search/cdx?url=*.{target}/*&output=text&fl=original&collapse=urlkey"
+        url = f"https://web.archive.org/cdx/search/cdx?url=*.{target}/*&output=text&fl=original&collapse=urlkey"
         req = urllib.request.Request(
             url,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -84,9 +83,7 @@ def fetch_wayback_subs(target: str, outfile: str) -> None:
         atomic_write(outfile, [])
 
 
-# ─────────────────────────────────────────
 # Phase 1.1 - Passive (all tools in parallel)
-# ─────────────────────────────────────────
 
 def run_passive(target: str, outdir: str):
     """Run all passive subdomain scrapers concurrently."""
@@ -173,9 +170,7 @@ def run_passive(target: str, outdir: str):
     logger.success("Phase 1.1 complete - all passive scrapers done.")
 
 
-# ─────────────────────────────────────────
 # Phase 1.1b - Permutation Generation
-# ─────────────────────────────────────────
 
 def run_permutations(target: str, outdir: str, passive_merged: str):
     """Generate permuted subdomain candidates from passive results, then resolve."""
@@ -229,7 +224,7 @@ def run_permutations(target: str, outdir: str, passive_merged: str):
     )
 
     # Resolve via puredns
-    if os.path.isfile(config.resolvers_file) and os.path.isfile(all_perm_file):
+    if os.path.isfile(config.resolvers_file) and os.path.isfile(all_perm_file) and os.path.getsize(all_perm_file) > 0:
         run(
             ["puredns", "resolve", all_perm_file, "-r", config.resolvers_file,
              "-w", f"{outdir}/puredns_perms.txt"],
@@ -239,9 +234,7 @@ def run_permutations(target: str, outdir: str, passive_merged: str):
     logger.success("Phase 1.1b complete - permutation generation done.")
 
 
-# ─────────────────────────────────────────
 # Phase 1.2 - Brute-force
-# ─────────────────────────────────────────
 
 def run_brute(target: str, outdir: str):
     """Phase 1.2 - Brute-force subdomain enumeration (some tools in parallel)."""
@@ -302,9 +295,7 @@ def run_brute(target: str, outdir: str):
     logger.success("Phase 1.2 complete - brute-force done.")
 
 
-# ─────────────────────────────────────────
 # Phase 1.3 & 1.4 - Combine + Probe
-# ─────────────────────────────────────────
 
 def combine_and_probe(target: str, outdir: str) -> str:
     """Deduplicate all subdomain files then probe live ones via httpx, wafw00f, cdncheck."""
@@ -326,7 +317,7 @@ def combine_and_probe(target: str, outdir: str) -> str:
         f"{outdir}/gobuster_dns.txt",
         f"{outdir}/puredns_brute.txt",
         f"{outdir}/puredns_perms.txt",
-        f"{outdir}/dnsgen_massdns.txt",
+        f"{outdir}/massdns_perms.txt",
         f"{outdir}/github_subs.txt",
         f"{outdir}/thexrecon.txt",
     ]
@@ -374,22 +365,12 @@ def combine_and_probe(target: str, outdir: str) -> str:
     live_count = len(read_lines(f"{outdir}/live_subdomains.txt"))
     logger.success(f"Live subdomains: {live_count}")
 
-    # ASN expansion via asnmap (on live IPs)
-    if config.asnmap_expand:
-        live_ips = f"{outdir}/live_ips.txt"
-        if os.path.isfile(live_ips):
-            run(
-                ["asnmap", "-l", live_ips, "-silent", "-o", f"{outdir}/asn_cidrs.txt"],
-                timeout=120,
-            )
-            logger.info("asnmap CIDR expansion complete.")
+
 
     return f"{outdir}/live_subdomains.txt"
 
 
-# ─────────────────────────────────────────
 # Entry point
-# ─────────────────────────────────────────
 
 def run_phase(target: str, outdir: str, wildcard_mode: bool):
     """Called by main.py to run the full subdomain phase."""
